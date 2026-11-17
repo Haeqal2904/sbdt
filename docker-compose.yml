@@ -1,0 +1,145 @@
+services:
+  # ==============================================================
+  # 1. Primary Database Node (Write Operations)
+  # ==============================================================
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: postgres-primary
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app_db
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_password
+      PGDATA: /var/lib/postgresql/data
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby=on
+      -c hot_standby_feedback=on
+    ports:
+      - "5432:5432"
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - ./database/primary/01-init-replication.sh:/docker-entrypoint-initdb.d/01-init-replication.sh:ro
+      - ./database/primary/02-init-schema.sql:/docker-entrypoint-initdb.d/02-init-schema.sql:ro
+    networks:
+      - kapita_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d app_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ==============================================================
+  # 2. Standby Read-Replica Node (Read Operations)
+  # ==============================================================
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: postgres-replica
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      PGPASSWORD: replica_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - replica_data:/var/lib/postgresql/data
+      - ./database/replica/entrypoint-replica.sh:/usr/local/bin/entrypoint-replica.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/entrypoint-replica.sh"]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    networks:
+      - kapita_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d app_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ==============================================================
+  # 3. Identity Provider / Single Sign-On (Keycloak OIDC / OAuth2)
+  # ==============================================================
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.5
+    container_name: keycloak-sso
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-config.json:/opt/keycloak/data/import/realm-config.json:ro
+    networks:
+      - kapita_net
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/kapita-realm HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ==============================================================
+  # 4. Backend Microservice API (FastAPI + Inference Engine)
+  # ==============================================================
+  api-service:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: api-service
+    restart: unless-stopped
+    environment:
+      # Database Connections
+      DB_PRIMARY_HOST: postgres-primary
+      DB_PRIMARY_PORT: 5432
+      DB_PRIMARY_USER: app_user
+      DB_PRIMARY_PASSWORD: app_password
+      DB_PRIMARY_NAME: app_db
+      DB_REPLICA_HOST: postgres-replica
+      DB_REPLICA_PORT: 5432
+      DB_REPLICA_USER: app_user
+      DB_REPLICA_PASSWORD: app_password
+      DB_REPLICA_NAME: app_db
+
+      # Keycloak SSO Configurations
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_EXTERNAL_URL: http://localhost:8080
+      KEYCLOAK_REALM: kapita-realm
+      KEYCLOAK_CLIENT_ID: api-client
+      KEYCLOAK_CLIENT_SECRET: api-client-secret-12345
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - kapita_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  primary_data:
+    driver: local
+  replica_data:
+    driver: local
+
+networks:
+  kapita_net:
+    driver: bridge
+

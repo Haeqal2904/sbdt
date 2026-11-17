@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-primary-init-scripts
+  namespace: kapita
+data:
+  01-init-replication.sh: |
+    #!/bin/bash
+    set -e
+    echo "[PostgreSQL Primary Init] Setting up replication user..."
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        DO \$\$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+                CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '${REPLICATION_PASSWORD}';
+                RAISE NOTICE 'Replication user created.';
+            END IF;
+        END
+        \$\$;
+    EOSQL
+    echo "host replication replicator 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "SELECT pg_reload_conf();"
+
+  02-init-schema.sql: |
+    CREATE TABLE IF NOT EXISTS predictions (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(100) NOT NULL,
+        username VARCHAR(100),
+        model_name VARCHAR(100) NOT NULL DEFAULT 'iris_classifier',
+        model_version VARCHAR(50) NOT NULL DEFAULT 'v1.0.0',
+        features JSONB NOT NULL,
+        prediction VARCHAR(100) NOT NULL,
+        confidence DOUBLE PRECISION NOT NULL,
+        probabilities JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_predictions_user_id ON predictions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_predictions_created_at ON predictions(created_at);
+---
+# Headless Service for StatefulSet Pod DNS Identity (postgres-primary-0.postgres-primary-headless.kapita.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary-headless
+  namespace: kapita
+  labels:
+    app: postgres-primary
+    service-type: headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgres-primary
+---
+# ClusterIP Service for Single Endpoint Hostname Discovery (postgres-primary.kapita.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: kapita
+  labels:
+    app: postgres-primary
+    service-type: clusterip
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgres-primary
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-primary
+  namespace: kapita
+  labels:
+    app: postgres-primary
+    role: primary
+spec:
+  serviceName: "postgres-primary-headless"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-primary
+  template:
+    metadata:
+      labels:
+        app: postgres-primary
+        role: primary
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args:
+            - "postgres"
+            - "-c"
+            - "wal_level=replica"
+            - "-c"
+            - "max_wal_senders=10"
+            - "-c"
+            - "max_replication_slots=10"
+            - "-c"
+            - "hot_standby=on"
+            - "-c"
+            - "hot_standby_feedback=on"
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: kapita-config
+                  key: DB_PRIMARY_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: kapita-config
+                  key: DB_PRIMARY_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kapita-secrets
+                  key: POSTGRES_PASSWORD
+            - name: REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kapita-secrets
+                  key: REPLICATION_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgres
+          readinessProbe:
+            exec:
+              command: ["psql", "-U", "app_user", "-d", "app_db", "-c", "SELECT 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["psql", "-U", "app_user", "-d", "app_db", "-c", "SELECT 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          volumeMounts:
+            - name: primary-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: postgres-primary-init-scripts
+            defaultMode: 0777
+  # Dynamic PersistentVolumeClaim (PVC) provisioning for physical data independence
+  volumeClaimTemplates:
+    - metadata:
+        name: primary-data
+        labels:
+          app: postgres-primary
+          role: primary
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

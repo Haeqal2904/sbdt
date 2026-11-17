@@ -1,0 +1,138 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-config
+  namespace: kapita
+data:
+  realm-config.json: |
+    {
+      "id": "kapita-realm",
+      "realm": "kapita-realm",
+      "displayName": "Kapita Selekta SSO Realm",
+      "enabled": true,
+      "sslRequired": "none",
+      "registrationAllowed": true,
+      "loginWithEmailAllowed": true,
+      "roles": {
+        "realm": [
+          {"name": "user"},
+          {"name": "student"},
+          {"name": "admin"}
+        ]
+      },
+      "clients": [
+        {
+          "clientId": "api-client",
+          "name": "Backend API Service Client",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "api-client-secret-12345",
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": true,
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "redirectUris": ["*"],
+          "webOrigins": ["*"]
+        }
+      ],
+      "users": [
+        {
+          "username": "student",
+          "enabled": true,
+          "email": "student@universitas.ac.id",
+          "firstName": "Mahasiswa",
+          "lastName": "Kapita",
+          "credentials": [{"type": "password", "value": "student123", "temporary": false}],
+          "realmRoles": ["user", "student"]
+        },
+        {
+          "username": "admin",
+          "enabled": true,
+          "email": "admin@universitas.ac.id",
+          "firstName": "Administrator",
+          "lastName": "Sistem",
+          "credentials": [{"type": "password", "value": "admin123", "temporary": false}],
+          "realmRoles": ["admin", "user"]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-service
+  namespace: kapita
+  labels:
+    app: keycloak
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: keycloak
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: kapita
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:24.0.5
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: kapita-secrets
+                  key: KEYCLOAK_ADMIN
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kapita-secrets
+                  key: KEYCLOAK_ADMIN_PASSWORD
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /realms/kapita-realm
+              port: 8080
+            initialDelaySeconds: 25
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /realms/kapita-realm
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 15
+          volumeMounts:
+            - name: realm-config
+              mountPath: /opt/keycloak/data/import/realm-config.json
+              subPath: realm-config.json
+      volumes:
+        - name: realm-config
+          configMap:
+            name: keycloak-realm-config

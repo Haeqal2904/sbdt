@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-replica-scripts
+  namespace: kapita
+data:
+  entrypoint-replica.sh: |
+    #!/bin/sh
+    set -e
+    echo "[PostgreSQL Replica] Waiting for primary DNS endpoint (${DB_PRIMARY_HOST})..."
+    until pg_isready -h "${DB_PRIMARY_HOST}" -p 5432 -U "${DB_PRIMARY_USER}"; do
+      sleep 2
+    done
+
+    if [ ! -s "$PGDATA/PG_VERSION" ]; then
+      echo "[PostgreSQL Replica] Running initial pg_basebackup from ${DB_PRIMARY_HOST}..."
+      rm -rf "${PGDATA:?}"/*
+      pg_basebackup \
+        -h "${DB_PRIMARY_HOST}" \
+        -p 5432 \
+        -U replicator \
+        -D "$PGDATA" \
+        -Fp \
+        -Xs \
+        -R \
+        -P
+      chown -R postgres:postgres "$PGDATA"
+      chmod 700 "$PGDATA"
+    fi
+    exec docker-entrypoint.sh postgres
+---
+# Headless Service for StatefulSet Pod DNS Identity (postgres-replica-0.postgres-replica-headless.kapita.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica-headless
+  namespace: kapita
+  labels:
+    app: postgres-replica
+    service-type: headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgres-replica
+---
+# ClusterIP Service for Single Endpoint Hostname Discovery (postgres-replica.kapita.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: kapita
+  labels:
+    app: postgres-replica
+    service-type: clusterip
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgres-replica
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-replica
+  namespace: kapita
+  labels:
+    app: postgres-replica
+    role: replica
+spec:
+  serviceName: "postgres-replica-headless"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-replica
+  template:
+    metadata:
+      labels:
+        app: postgres-replica
+        role: replica
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          command: ["/bin/sh", "/usr/local/bin/entrypoint-replica.sh"]
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: DB_PRIMARY_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: kapita-config
+                  key: DB_PRIMARY_HOST
+            - name: DB_PRIMARY_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: kapita-config
+                  key: DB_PRIMARY_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kapita-secrets
+                  key: REPLICATION_PASSWORD
+          ports:
+            - containerPort: 5432
+              name: postgres
+          readinessProbe:
+            exec:
+              command: ["psql", "-U", "app_user", "-d", "app_db", "-c", "SELECT 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["psql", "-U", "app_user", "-d", "app_db", "-c", "SELECT 1"]
+            initialDelaySeconds: 25
+            periodSeconds: 15
+          volumeMounts:
+            - name: replica-data
+              mountPath: /var/lib/postgresql/data
+            - name: replica-entrypoint
+              mountPath: /usr/local/bin/entrypoint-replica.sh
+              subPath: entrypoint-replica.sh
+      volumes:
+        - name: replica-entrypoint
+          configMap:
+            name: postgres-replica-scripts
+            defaultMode: 0777
+  # Dynamic PersistentVolumeClaim (PVC) provisioning for physical data independence
+  volumeClaimTemplates:
+    - metadata:
+        name: replica-data
+        labels:
+          app: postgres-replica
+          role: replica
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

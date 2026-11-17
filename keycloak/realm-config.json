@@ -1,0 +1,94 @@
+{
+  "id": "kapita-realm",
+  "realm": "kapita-realm",
+  "displayName": "Kapita Selekta SSO Realm",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "user",
+        "description": "Standard User Role"
+      },
+      {
+        "name": "student",
+        "description": "Student Role"
+      },
+      {
+        "name": "admin",
+        "description": "Administrator Role"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "api-client",
+      "name": "Backend API Service Client",
+      "description": "Client used by FastAPI microservice and client apps",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "api-client-secret-12345",
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "attributes": {
+        "access.token.lifespan": "3600"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "student",
+      "enabled": true,
+      "email": "student@universitas.ac.id",
+      "firstName": "Mahasiswa",
+      "lastName": "Kapita",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "student123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "user",
+        "student"
+      ]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@universitas.ac.id",
+      "firstName": "Administrator",
+      "lastName": "Sistem",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin",
+        "user"
+      ]
+    }
+  ]
+}
+
